@@ -580,7 +580,32 @@ public class GameLauncherService
             var loaderPath = D2RLoaderService.GetLoaderPath(profile.InstallDirectory)!;
             workingDirectory = profile.InstallDirectory;
 
-            if (!OperatingSystem.IsWindows())
+            if (!OperatingSystem.IsWindows() && profile.Type == InstallationType.Steam)
+            {
+                // Proton started directly cannot reproduce the per-launch Steam session
+                // (Steam3Master, SteamAppUser); without it D2R's online check fails and the
+                // game reports the 30 day offline limit. Steam supplies it, and the app's
+                // launch options swap D2R.exe for D2RLoader.exe.
+                executablePath = profile.SteamDirectory ?? FindSteamExecutable(profile.InstallDirectory) ?? string.Empty;
+
+                if (string.IsNullOrWhiteSpace(executablePath) || !File.Exists(executablePath))
+                {
+                    Notifications.SendNotification("Steam was not found. Please locate its executable in the Install Directory section.");
+                    return null;
+                }
+
+                if (!SteamLoaderLaunchOptions.IsConfigured(profile.InstallDirectory, out var launchOptionsHint))
+                {
+                    Notifications.SendNotification(launchOptionsHint, "Warning");
+                    return null;
+                }
+
+                finalArgs = $"{GetSteamArgumentPrefix(executablePath)}-silent -applaunch {SteamAppId} {launchParameters}";
+
+                // Steam sets the game's working directory itself.
+                workingDirectory = null;
+            }
+            else if (!OperatingSystem.IsWindows())
             {
                 if (!SteamProtonService.TryResolve(profile, loaderPath, launchParameters, out var proton, out var protonReason)
                     || proton is null)
