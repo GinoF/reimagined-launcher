@@ -627,7 +627,7 @@ public sealed class LadderBundleService(
         }
         else
         {
-            var loaderVersion = FileVersionInfo.GetVersionInfo(loaderPath).FileVersion;
+            var loaderVersion = ReadFileVersion(loaderPath);
             if (TryParseVersionCore(bundle.Compatibility.RequiredD2RLoaderVersion, out var requiredLoader)
                 && requiredLoader > new Version(0, 0, 0)
                 && (!TryParseVersionCore(loaderVersion, out var currentLoader) || currentLoader < requiredLoader))
@@ -674,7 +674,7 @@ public sealed class LadderBundleService(
             && bundle.Compatibility.SupportedGameVersion != "*"
             && File.Exists(gamePath))
         {
-            var gameVersion = FileVersionInfo.GetVersionInfo(gamePath).FileVersion ?? string.Empty;
+            var gameVersion = ReadFileVersion(gamePath) ?? string.Empty;
             if (!gameVersion.StartsWith(bundle.Compatibility.SupportedGameVersion, StringComparison.OrdinalIgnoreCase))
             {
                 problems.Add($"D2R game version {bundle.Compatibility.SupportedGameVersion} is required; {gameVersion} is installed.");
@@ -1134,6 +1134,12 @@ public sealed class LadderBundleService(
     /// one keeps it beside the folder. Both are real layouts in the wild, so
     /// looking in only one place reports a correct install as the wrong version.
     /// </summary>
+    // FileVersionInfo only reads version resources on Windows.
+    private static string? ReadFileVersion(string path)
+        => FileVersionInfo.GetVersionInfo(path).FileVersion is { Length: > 0 } version
+            ? version
+            : PeFileVersion.Read(path);
+
     private static string? ReadInstalledModVersion(string installDirectory)
     {
         var modRoot = ModInstallationPaths.LadderModRoot(installDirectory);
