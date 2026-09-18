@@ -122,6 +122,13 @@ public static partial class D2RLoaderService
         };
     }
 
+    /// <summary>
+    /// Whether this platform can launch D2RLoader at all for the profile, before
+    /// checking that the install directory and loader files are actually present.
+    /// </summary>
+    public static bool IsLoaderPlatformSupported(InstallationProfile profile)
+        => OperatingSystem.IsWindows() || SteamProtonService.IsSupported(profile, out _);
+
     public static bool CanUseOnlineExperience(InstallationProfile profile, out string? reason)
     {
         if (profile.Type == InstallationType.D2RMM)
@@ -130,9 +137,9 @@ public static partial class D2RLoaderService
             return false;
         }
 
-        if (!OperatingSystem.IsWindows())
+        if (!OperatingSystem.IsWindows() && !SteamProtonService.IsSupported(profile, out var protonReason))
         {
-            reason = "D2RLoader launching is currently supported on Windows only.";
+            reason = protonReason ?? "D2RLoader launching is not available on this platform.";
             return false;
         }
 

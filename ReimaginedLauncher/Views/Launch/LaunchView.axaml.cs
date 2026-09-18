@@ -614,7 +614,7 @@ public partial class LaunchView : UserControl
         var profile = MainWindow.Settings.CurrentProfile;
         if (_hasPromptedForMissingLoader || _isLoaderInstallPromptOpen || !IsLoaded
             || _isLaunching || _isRunningLadderAction || MainWindow.IsInstallInProgress
-            || MainWindow.IsGameRunning() || !OperatingSystem.IsWindows()
+            || MainWindow.IsGameRunning() || !D2RLoaderService.IsLoaderPlatformSupported(profile)
             || profile.Type == InstallationType.D2RMM
             || profile.LaunchExperience is not (LaunchExperience.Online or LaunchExperience.Ladder)
             || !InstallDirectoryValidator.IsValidInstallDirectory(profile.InstallDirectory)
@@ -631,7 +631,7 @@ public partial class LaunchView : UserControl
     private async Task PromptInstallD2RLoaderAsync(InstallationProfile profile)
     {
         if (_isLoaderInstallPromptOpen
-            || !OperatingSystem.IsWindows()
+            || !D2RLoaderService.IsLoaderPlatformSupported(profile)
             || !InstallDirectoryValidator.IsValidInstallDirectory(profile.InstallDirectory)
             || TopLevel.GetTopLevel(this) is not Window owner)
         {

@@ -472,7 +472,16 @@ public class GameLauncherService
                 return $"D2RLoader unavailable: {reason}";
             }
 
-            return $"\"{D2RLoaderService.GetLoaderPath(profile.InstallDirectory)}\" {launchParameters}";
+            var loaderPath = D2RLoaderService.GetLoaderPath(profile.InstallDirectory)!;
+            if (!OperatingSystem.IsWindows()
+                && SteamProtonService.TryResolve(profile, loaderPath, launchParameters, out var protonPreview, out _)
+                && protonPreview is not null)
+            {
+                var exports = string.Join(" ", protonPreview.Environment.Select(pair => $"{pair.Key}=\"{pair.Value}\""));
+                return $"{exports} \"{protonPreview.Executable}\" {protonPreview.Arguments}";
+            }
+
+            return $"\"{loaderPath}\" {launchParameters}";
         }
 
         if (profile.Type == InstallationType.Steam)
@@ -568,9 +577,32 @@ public class GameLauncherService
                 return null;
             }
 
-            executablePath = D2RLoaderService.GetLoaderPath(profile.InstallDirectory)!;
-            finalArgs = launchParameters;
+            var loaderPath = D2RLoaderService.GetLoaderPath(profile.InstallDirectory)!;
             workingDirectory = profile.InstallDirectory;
+
+            if (!OperatingSystem.IsWindows())
+            {
+                if (!SteamProtonService.TryResolve(profile, loaderPath, launchParameters, out var proton, out var protonReason)
+                    || proton is null)
+                {
+                    Notifications.SendNotification(protonReason ?? "Could not resolve Proton for this install.", "Warning");
+                    return null;
+                }
+
+                SteamProtonService.ClearStaleSession(proton);
+
+                executablePath = proton.Executable;
+                finalArgs = proton.Arguments;
+                foreach (var (name, value) in proton.Environment)
+                {
+                    environmentOverrides[name] = value;
+                }
+            }
+            else
+            {
+                executablePath = loaderPath;
+                finalArgs = launchParameters;
+            }
         }
         else if (profile.Type == InstallationType.Steam)
         {
