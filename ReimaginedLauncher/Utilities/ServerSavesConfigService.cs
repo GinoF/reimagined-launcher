@@ -9,20 +9,12 @@ public sealed record ServerSavesLaunchSettings(
     string ApiBaseUrl,
     string AccessToken,
     Guid? LadderId,
-    string LadderLaunchTicket);
+    string LadderLaunchTicket,
+    string StatusSessionId = "");
 
 /// <summary>
-/// Installs the server-saves D2RLoader plugin from the launcher's own bundled
-/// copy and writes the launch-time settings it needs into its TOML config. The
-/// plugin stores a player's characters on the Reimagined API and hides the
-/// local ones, so it must only ever be enabled for a signed-in ladder launch.
+/// Configures the Server Saves plugin supplied by the signed ladder package.
 /// </summary>
-/// <remarks>
-/// The installing and TOML rewriting live in <see cref="D2RLoaderPluginPackage"/>,
-/// shared with the other bundled plugins. What stays here is what is specific to
-/// this one: the settings it owns, and the rule that it is never enabled without
-/// both an API address and a token.
-/// </remarks>
 public static class ServerSavesConfigService
 {
     public const string PluginId = "server-saves";
@@ -32,7 +24,7 @@ public static class ServerSavesConfigService
         "# server-saves - launcher-managed settings.\n"
         + "#\n"
         + "# The Reimagined launcher rewrites enabled, api_base_url, access_token,\n"
-        + "# ladder_id and ladder_launch_ticket every launch. Anything else you set\n"
+        + "# ladder_id, ladder_launch_ticket and status_session_id every launch. Anything else you set\n"
         + "# here is preserved, and any\n"
         + "# setting left out uses the plugin's built-in default.\n"
         + "\n";
@@ -43,25 +35,6 @@ public static class ServerSavesConfigService
     public static bool IsPluginInstalled(string? installDirectory)
     {
         return Package.IsInstalled(installDirectory);
-    }
-
-    internal static bool CanSupplyApprovedPlugin(
-        string fileName,
-        string sha256,
-        string? bundledPluginPath = null)
-    {
-        return Package.CanSupplyApproved(fileName, sha256, bundledPluginPath);
-    }
-
-    /// <summary>
-    /// Copies the launcher's bundled plugin into the mod's plugin folder if it
-    /// is missing or out of date, so players never have to source the DLL
-    /// themselves. Returns false only on a real failure - a copy that was
-    /// already current is success, not a no-op to warn about.
-    /// </summary>
-    public static Task<bool> EnsureInstalledAsync(string? installDirectory, string? bundledPluginPath = null)
-    {
-        return Package.EnsureInstalledAsync(installDirectory, bundledPluginPath);
     }
 
     /// <summary>
@@ -93,7 +66,8 @@ public static class ServerSavesConfigService
             ["api_base_url"] = D2RLoaderPluginPackage.Quote(D2RLoaderPluginPackage.NormalizeBaseUrl(settings.ApiBaseUrl)),
             ["access_token"] = D2RLoaderPluginPackage.Quote(settings.AccessToken),
             ["ladder_id"] = D2RLoaderPluginPackage.Quote(settings.LadderId is { } ladderId ? ladderId.ToString() : string.Empty),
-            ["ladder_launch_ticket"] = D2RLoaderPluginPackage.Quote(settings.LadderLaunchTicket)
+            ["ladder_launch_ticket"] = D2RLoaderPluginPackage.Quote(settings.LadderLaunchTicket),
+            ["status_session_id"] = D2RLoaderPluginPackage.Quote(settings.StatusSessionId)
         };
 
         return await Package.WriteAsync(installDirectory, values, requireInstalled: true, cancellationToken);
@@ -113,7 +87,8 @@ public static class ServerSavesConfigService
             ["enabled"] = "false",
             ["access_token"] = "\"\"",
             ["ladder_id"] = "\"\"",
-            ["ladder_launch_ticket"] = "\"\""
+            ["ladder_launch_ticket"] = "\"\"",
+            ["status_session_id"] = "\"\""
         };
 
         var normalDisabled = await NormalPackage.WriteAsync(installDirectory, values, requireInstalled: false, cancellationToken);

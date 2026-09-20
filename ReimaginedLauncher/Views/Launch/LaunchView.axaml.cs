@@ -1,4 +1,5 @@
 using System.Threading.Tasks;
+using System.Threading;
 using System;
 using System.Diagnostics;
 using System.IO;
@@ -43,6 +44,7 @@ public partial class LaunchView : UserControl
     private D2RLoaderInventory? _loaderInventory;
     private bool? _isCompactLayout;
     private readonly DispatcherTimer _ladderScheduleTimer = new() { Interval = TimeSpan.FromSeconds(1) };
+    private ServerSaveMonitor? _preparedServerSaves;
     private LadderLaunchSchedule? _ladderSchedule;
     private long _lastLadderRefresh;
     private TimeSpan _ladderRefreshInterval;
@@ -338,8 +340,8 @@ public partial class LaunchView : UserControl
         OfflineExperienceButton.Classes.Set("selected", profile.LaunchExperience == LaunchExperience.Offline);
         OnlineExperienceButton.Classes.Set("selected", isOnlineExperience);
         LadderExperienceButton.Classes.Set("selected", isLadderExperience);
-        // Neither type lets the launcher substitute D2RLoader.exe for D2R.exe.
-        var supportsD2RLoader = profile.Type is not (InstallationType.D2RMM or InstallationType.Lutris);
+        // D2RMM is the only type that does not support D2RLoader.
+        var supportsD2RLoader = profile.Type is not InstallationType.D2RMM;
         OnlineExperienceButton.IsEnabled = supportsD2RLoader;
         LadderExperienceButton.IsEnabled = supportsD2RLoader;
         OnlineExperiencePanel.IsVisible = isOnlineExperience && supportsD2RLoader;
@@ -1085,12 +1087,9 @@ public partial class LaunchView : UserControl
                                                        state.Approval.Sha256,
                                                        state.Approval.Kind)
                                                    || (state.Approval.Kind == D2RLoaderExtensionKind.Plugin
-                                                       && (ServerSavesConfigService.CanSupplyApprovedPlugin(
+                                                       && ChatRelayConfigService.CanSupplyApprovedPlugin(
                                                        state.Approval.FileName,
-                                                       state.Approval.Sha256)
-                                                   || ChatRelayConfigService.CanSupplyApprovedPlugin(
-                                                       state.Approval.FileName,
-                                                       state.Approval.Sha256))));
+                                                       state.Approval.Sha256)));
                     return new LadderExtensionChoice
                     {
                         ApprovalId = state.Approval.Id,
@@ -1874,7 +1873,7 @@ public partial class LaunchView : UserControl
                         : null;
 
                     var minimizeTarget = MainWindow.Settings.MinimizeToTray ? MainWindow.Instance : null;
-                    _ = WatchGameExitAsync(gameProcess, expectedExePath, minimizeTarget, lutrisGameExePath);
+                    _ = WatchGameExitAsync(gameProcess, expectedExePath, minimizeTarget, lutrisGameExePath, _preparedServerSaves);
                 }
             }
             catch (Exception ex)
@@ -2131,12 +2130,16 @@ public partial class LaunchView : UserControl
         }
     }
 
-    private static async Task WatchGameExitAsync(
+    private async Task WatchGameExitAsync(
         Process gameProcess,
         string? expectedExePath,
         MainWindow? minimizeTarget,
-        string? lutrisGameExePath = null)
+        string? lutrisGameExePath = null,
+        ServerSaveMonitor? serverSaves = null)
     {
+        using var monitoring = new CancellationTokenSource();
+        var monitorTask = serverSaves is null ? Task.CompletedTask : MonitorServerSavesAsync(serverSaves, monitoring.Token);
+        var gameExitConfirmed = false;
         try
         {
             if (lutrisGameExePath is not null)
@@ -2155,11 +2158,11 @@ public partial class LaunchView : UserControl
             }
             else if (minimizeTarget is not null)
             {
-                await minimizeTarget.MinimizeToTrayAndWaitForExitAsync(gameProcess, expectedExePath);
+                gameExitConfirmed = await minimizeTarget.MinimizeToTrayAndWaitForExitAsync(gameProcess, expectedExePath);
             }
             else
             {
-                await MainWindow.WaitForGameExitAsync(gameProcess, expectedExePath);
+                gameExitConfirmed = await MainWindow.WaitForGameExitAsync(gameProcess, expectedExePath);
             }
 
         }
@@ -2167,6 +2170,70 @@ public partial class LaunchView : UserControl
         {
             LaunchDiagnostics.LogException("Could not finish watching the game process", exception);
         }
+        finally
+        {
+            if (serverSaves is not null)
+            {
+                await ServerSaveSessionMonitor.WaitForInactiveAsync(
+                    () => ServerSaveStatus.ReadAsync(serverSaves, CancellationToken.None),
+                    () => DateTimeOffset.UtcNow,
+                    () => Task.Delay(TimeSpan.FromSeconds(2)));
+            }
+            monitoring.Cancel();
+            await monitorTask;
+            if (serverSaves is not null)
+            {
+                var status = await ServerSaveStatus.ReadAsync(serverSaves, CancellationToken.None);
+                await ShowServerSaveStatusAsync(ServerSaveSessionMonitor.DescribeAfterWatch(
+                    status, DateTimeOffset.UtcNow, gameExitConfirmed));
+            }
+        }
+    }
+
+    private async Task MonitorServerSavesAsync(ServerSaveMonitor monitor, CancellationToken token)
+    {
+        var started = DateTimeOffset.UtcNow;
+        string? notified = null;
+        try
+        {
+            while (!token.IsCancellationRequested)
+            {
+                var status = await ServerSaveStatus.ReadAsync(monitor, token);
+                var display = status?.Describe(DateTimeOffset.UtcNow, sessionEnded: false);
+                if (display is null && DateTimeOffset.UtcNow - started > TimeSpan.FromSeconds(45))
+                    display = new ServerSaveStatusDisplay("The game has not reported its save status. Recent progress is not confirmed saved.",
+                        "Check that Server Saves is running before continuing.", true, "status_missing");
+                if (display is not null)
+                {
+                    await ShowServerSaveStatusAsync(display);
+                    if (display.Warning && display.NotificationKey != notified)
+                    {
+                        Notifications.SendNotification(display.Message + "\n" + display.Confirmed, "Warning");
+                        notified = display.NotificationKey;
+                    }
+                    if (!display.Warning) notified = null;
+                }
+                await Task.Delay(TimeSpan.FromSeconds(2), token);
+            }
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+        catch (Exception exception)
+        {
+            LaunchDiagnostics.LogException("Could not monitor server save status", exception);
+            await ShowServerSaveStatusAsync(new ServerSaveStatusDisplay("Save status is unavailable. Recent progress is not confirmed saved.",
+                "Check Server Saves before continuing.", true, "status_unavailable"));
+        }
+    }
+
+    private async Task ShowServerSaveStatusAsync(ServerSaveStatusDisplay display)
+    {
+        await Dispatcher.UIThread.InvokeAsync(() =>
+        {
+            ServerSaveStatusPanel.IsVisible = true;
+            ServerSaveStatusPanel.Classes.Set("warning-banner", display.Warning);
+            ServerSaveStatusText.Text = display.Message;
+            ServerSaveConfirmedText.Text = display.Confirmed;
+        });
     }
 
     /// <summary>
@@ -2215,6 +2282,8 @@ public partial class LaunchView : UserControl
     /// </summary>
     private async Task<bool> PrepareServerSavesAsync(InstallationProfile profile)
     {
+        _preparedServerSaves = null;
+        ServerSaveStatusPanel.IsVisible = false;
         var isLadderLaunch = profile.Type != InstallationType.D2RMM
                              && profile.LaunchExperience == LaunchExperience.Ladder;
 
@@ -2239,10 +2308,10 @@ public partial class LaunchView : UserControl
 
             if (!ServerSavesConfigService.IsPluginInstalled(profile.InstallDirectory))
             {
-                var localPreparation = await LadderSaveDirectoryService.PrepareAsync(profile.InstallDirectory, ladder.Id, ladder.Name);
-                if (localPreparation.DirectoryPath is null)
-                    Notifications.SendNotification(localPreparation.ErrorMessage!, "Ladder save preparation failed");
-                return localPreparation.DirectoryPath is not null;
+                const string message = "Server Saves is missing from the ladder installation. Repair the ladder package before playing.";
+                LaunchDiagnostics.Log($"Ladder launch blocked: {message}");
+                Notifications.SendNotification(message, "Warning");
+                return false;
             }
 
             var accessToken = await _launcherAuthenticationService.GetAccessTokenAsync();
@@ -2268,11 +2337,13 @@ public partial class LaunchView : UserControl
                 LadderBundleService.LauncherVersion,
                 accessToken);
 
+            var statusSessionId = Guid.NewGuid().ToString("N");
             var settings = new ServerSavesLaunchSettings(
                 _apiHttpClient.BaseAddress.GetLeftPart(UriPartial.Authority),
                 accessToken,
                 ladder.Id,
-                launchTicket.LaunchTicket);
+                launchTicket.LaunchTicket,
+                statusSessionId);
             if (!await ServerSavesConfigService.EnableAsync(profile.InstallDirectory, settings))
             {
                 const string message = "The server-saves plugin configuration could not be written.";
@@ -2296,6 +2367,8 @@ public partial class LaunchView : UserControl
             }
 
             LaunchDiagnostics.Log($"server-saves configured for ladder {ladder.Id} at \"{preparation.DirectoryPath}\".");
+            _preparedServerSaves = new ServerSaveMonitor(
+                Path.Combine(preparation.DirectoryPath, ".server-saves", "status.json"), statusSessionId, ladder.Id);
 
             await ConfigureChatRelayAsync(profile, accessToken);
             return true;

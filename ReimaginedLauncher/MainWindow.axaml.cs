@@ -581,6 +581,16 @@ public partial class MainWindow : Window
                 _localModVersion = SelectInstalledModVersion(modInfoVersion, panelVersion);
 
                 IsLocalModDetected = Directory.Exists(modRootDirectory) || File.Exists(modInfoPath) || File.Exists(modInfoPathInMpq);
+
+                // Ladder installs the mod under ReimaginedLadder, so the normal
+                // check above would miss it. Detect the ladder mod too.
+                if (!IsLocalModDetected)
+                {
+                    var ladderModRoot = Path.Combine(installDir, "mods", "ReimaginedLadder");
+                    var ladderModInfo = Path.Combine(ladderModRoot, "modinfo.json");
+                    var ladderModInfoInMpq = Path.Combine(ladderModRoot, "ReimaginedLadder.mpq", "modinfo.json");
+                    IsLocalModDetected = Directory.Exists(ladderModRoot) || File.Exists(ladderModInfo) || File.Exists(ladderModInfoInMpq);
+                }
             }
         }
 
@@ -1530,24 +1540,24 @@ public partial class MainWindow : Window
         base.OnClosing(e);
     }
 
-    public async Task MinimizeToTrayAndWaitForExitAsync(Process gameProcess, string? expectedExePath = null)
+    public async Task<bool> MinimizeToTrayAndWaitForExitAsync(Process gameProcess, string? expectedExePath = null)
     {
         MinimizeToTray();
-        await WaitForGameExitAsync(gameProcess, expectedExePath);
+        var exited = await WaitForGameExitAsync(gameProcess, expectedExePath);
         RestoreFromTray();
+        return exited;
     }
 
     /// <summary>
     /// Waits for the game to close, taking ownership of <paramref name="gameProcess"/>.
-    /// Returns as soon as the process is gone, and also if it could never be
-    /// resolved - callers use this to run teardown, so it must not hang forever
-    /// on a launch that went sideways.
+    /// Returns true only when the game process was identified and its exit observed.
     /// </summary>
-    public static Task WaitForGameExitAsync(Process gameProcess, string? expectedExePath = null)
+    public static Task<bool> WaitForGameExitAsync(Process gameProcess, string? expectedExePath = null)
     {
         return Task.Run(() =>
         {
             Process? processToWatch = null;
+            var watchingGame = string.IsNullOrEmpty(expectedExePath);
             try
             {
                 // When launched via Steam, the returned process is Steam.exe, not the game.
@@ -1560,14 +1570,17 @@ public partial class MainWindow : Window
                     {
                         gameProcess.Dispose();
                         processToWatch = found;
+                        watchingGame = true;
                     }
                 }
 
                 processToWatch.WaitForExit();
+                return watchingGame;
             }
             catch (InvalidOperationException)
             {
-                // Process already exited or handle is invalid
+                // An invalid handle does not confirm that the game exited.
+                return false;
             }
             finally
             {

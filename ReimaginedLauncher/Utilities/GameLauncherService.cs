@@ -481,6 +481,14 @@ public class GameLauncherService
                 return $"{exports} \"{protonPreview.Executable}\" {protonPreview.Arguments}";
             }
 
+            if (OperatingSystem.IsLinux())
+            {
+                var winePath = FindExecutableOnPath("wine") ?? "wine";
+                var winePrefix = FindWinePrefix(loaderPath);
+                var prefix = winePrefix is null ? string.Empty : $"WINEPREFIX=\"{winePrefix}\" ";
+                return $"{prefix}\"{winePath}\" \"{loaderPath}\" {launchParameters}";
+            }
+
             return $"\"{loaderPath}\" {launchParameters}";
         }
 
@@ -605,23 +613,17 @@ public class GameLauncherService
                 // Steam sets the game's working directory itself.
                 workingDirectory = null;
             }
-            else if (!OperatingSystem.IsWindows())
+            else if (OperatingSystem.IsLinux())
             {
-                if (!SteamProtonService.TryResolve(profile, loaderPath, launchParameters, out var proton, out var protonReason)
-                    || proton is null)
+                executablePath = FindExecutableOnPath("wine") ?? string.Empty;
+                if (string.IsNullOrWhiteSpace(executablePath))
                 {
-                    Notifications.SendNotification(protonReason ?? "Could not resolve Proton for this install.", "Warning");
+                    Notifications.SendNotification("Wine was not found. Install Wine to use D2RLoader.", "Warning");
                     return null;
                 }
 
-                SteamProtonService.ClearStaleSession(proton);
-
-                executablePath = proton.Executable;
-                finalArgs = proton.Arguments;
-                foreach (var (name, value) in proton.Environment)
-                {
-                    environmentOverrides[name] = value;
-                }
+                winePrefix = FindWinePrefix(loaderPath);
+                finalArgs = $"\"{loaderPath}\" {launchParameters}";
             }
             else
             {

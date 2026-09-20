@@ -1,9 +1,11 @@
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Reflection.PortableExecutable;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
@@ -127,7 +129,9 @@ public static partial class D2RLoaderService
     /// checking that the install directory and loader files are actually present.
     /// </summary>
     public static bool IsLoaderPlatformSupported(InstallationProfile profile)
-        => OperatingSystem.IsWindows() || SteamProtonService.IsSupported(profile, out _);
+        => OperatingSystem.IsWindows()
+           || profile.Type != InstallationType.Steam
+           || SteamProtonService.IsSupported(profile, out _);
 
     public static bool CanUseOnlineExperience(InstallationProfile profile, out string? reason)
     {
@@ -137,9 +141,11 @@ public static partial class D2RLoaderService
             return false;
         }
 
-        if (!OperatingSystem.IsWindows() && !SteamProtonService.IsSupported(profile, out var protonReason))
+        if (!OperatingSystem.IsWindows()
+            && profile.Type == InstallationType.Steam
+            && !SteamProtonService.IsSupported(profile, out var protonReason))
         {
-            reason = protonReason ?? "D2RLoader launching is not available on this platform.";
+            reason = protonReason ?? "Steam profiles on Linux require a Proton prefix or Lutris for D2RLoader.";
             return false;
         }
 
@@ -315,16 +321,82 @@ public static partial class D2RLoaderService
         return match.Success ? bool.Parse(match.Groups[1].Value) : fallback;
     }
 
-    private static string? ReadFileVersion(string path)
+    internal static string? ReadFileVersion(string path)
     {
         try
         {
-            return NormalizeVersion(FileVersionInfo.GetVersionInfo(path).FileVersion);
+            var version = NormalizeVersion(FileVersionInfo.GetVersionInfo(path).FileVersion);
+            if (!string.IsNullOrWhiteSpace(version))
+            {
+                return version;
+            }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
         {
-            return null;
         }
+
+        // FileVersionInfo does not read PE metadata on Linux.
+        if (OperatingSystem.IsLinux())
+        {
+            return ReadPeFileVersion(path);
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Reads the binary file version from a PE file's VS_FIXEDFILEINFO resource.
+    /// This is a Linux fallback because <see cref="FileVersionInfo"/> cannot
+    /// read Windows PE metadata on non-Windows platforms.
+    /// </summary>
+    private static string? ReadPeFileVersion(string path)
+    {
+        try
+        {
+            using var stream = File.OpenRead(path);
+            using var pe = new PEReader(stream);
+            var resourceDir = pe.PEHeaders.PEHeader?.ResourceTableDirectory;
+            if (resourceDir is null || resourceDir.Value.RelativeVirtualAddress == 0)
+            {
+                return null;
+            }
+
+            var rva = resourceDir.Value.RelativeVirtualAddress;
+            var section = pe.PEHeaders.SectionHeaders.FirstOrDefault(
+                sh => rva >= sh.VirtualAddress && rva < sh.VirtualAddress + Math.Max(sh.VirtualSize, sh.SizeOfRawData));
+            if (section.Name == null)
+            {
+                return null;
+            }
+
+            var offset = section.PointerToRawData + (rva - section.VirtualAddress);
+            var length = Math.Min(resourceDir.Value.Size, section.SizeOfRawData - (rva - section.VirtualAddress));
+            stream.Position = offset;
+            var bytes = new byte[length];
+            stream.ReadExactly(bytes);
+
+            // Scan for VS_FIXEDFILEINFO signature: 0xFEEF04BD
+            for (var i = 0; i <= bytes.Length - 52; i++)
+            {
+                if (BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(i)) != 0xFEEF04BD)
+                {
+                    continue;
+                }
+
+                var fileVersionMs = BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(i + 8));
+                var fileVersionLs = BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(i + 12));
+                var major = (ushort)(fileVersionMs >> 16);
+                var minor = (ushort)(fileVersionMs & 0xFFFF);
+                var build = (ushort)(fileVersionLs >> 16);
+                var revision = (ushort)(fileVersionLs & 0xFFFF);
+                return NormalizeVersion($"{major}.{minor}.{build}.{revision}");
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or BadImageFormatException)
+        {
+        }
+
+        return null;
     }
 
     private static string? NormalizeVersion(string? version)
